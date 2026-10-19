@@ -906,6 +906,85 @@ function makeHostedSample(){
   f.hosted=true;return f;
 }
 
+/* ---------- free on-device AI (WebLLM, runs in the browser with WebGPU) ---------- */
+const LOCAL_AI={lib:'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.85/+esm',
+  big:{id:'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',size:'about 1 GB'},small:{id:'Llama-3.2-1B-Instruct-q4f16_1-MLC',size:'about 700 MB'}};
+const LOCAL_GUARD=`You are a friendly AI helper inside Bloom, a study and wellbeing website for secondary school students (mostly 14 to 18), made by Project Budline, a student-led initiative. You run on the student's own device.
+Keep answers short, clear and kind, using simple markdown. If you're not sure about a fact, say so and suggest checking with a teacher.
+Never diagnose or assess mental health and never claim to be a therapist. Never ask for personal details such as full names, addresses, schools or contact information. Keep everything age-appropriate.
+If a student says they are in danger or might hurt themselves, reply briefly and calmly: tell them to contact a trusted adult or their local emergency number now and mention Bloom's Support page.`;
+let localEngine=null,localLoading=null,localProgress=0,localModel=null;
+const lowMemDevice=()=>(navigator.deviceMemory&&navigator.deviceMemory<=4)||/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+function localOptedIn(){try{return localStorage.getItem('bloom:localai')==='on'}catch(e){return false}}
+function setLocalOptIn(on){try{if(on)localStorage.setItem('bloom:localai','on');else localStorage.removeItem('bloom:localai')}catch(e){}}
+async function localSupported(){try{return !!(navigator.gpu&&await navigator.gpu.requestAdapter())}catch(e){return false}}
+async function ensureLocalEngine(){
+  if(localEngine)return localEngine;
+  if(!localLoading){
+    aiStatus='local-loading';localProgress=0;paintAIStatus();
+    localLoading=(async()=>{
+      const webllm=await import(LOCAL_AI.lib);
+      const cfg={initProgressCallback:r=>{const p=Math.round((r.progress||0)*100);if(p!==localProgress){localProgress=p;paintAIStatus()}}};
+      const order=lowMemDevice()?[LOCAL_AI.small]:[LOCAL_AI.big,LOCAL_AI.small];
+      let lastErr;
+      for(const m of order){try{const eng=await webllm.CreateMLCEngine(m.id,cfg);localModel=m;return eng}catch(e){lastErr=e;console.warn('On-device AI model failed',m.id,e)}}
+      throw lastErr;
+    })();
+  }
+  try{localEngine=await localLoading;aiStatus='local';aiNote='';paintAIStatus();return localEngine}
+  catch(e){localLoading=null;localEngine=null;aiStatus='local-off';aiNote='This device couldn’t start the free AI (it may not have enough graphics memory), so helpers show example replies.';paintAIStatus();throw {code:'local_failed'}}
+}
+function makeLocalSample(){
+  const toMsgs=input=>{
+    let turns=typeof input==='string'?[{role:'user',content:input}]:input.map(t=>({role:t.role,content:t.content}));
+    let sys=LOCAL_GUARD;
+    if(typeof input!=='string'&&turns.length>1&&turns[0].role==='user'){sys+='\n\nInstructions for this helper:\n'+turns[0].content;turns=turns.slice(1)}
+    turns=turns.slice(-8);while(turns.length&&turns[0].role!=='user')turns.shift();
+    const merged=[];turns.forEach(t=>{const last=merged[merged.length-1];if(last&&last.role===t.role)last.content+='\n\n'+t.content;else merged.push(t)});
+    return [{role:'system',content:sys},...merged];
+  };
+  const run=async(input,opts={},json=false)=>{
+    const eng=await ensureLocalEngine();
+    if(opts.signal&&opts.signal.aborted)throw {code:'cancelled'};
+    const stop=()=>{try{eng.interruptGenerate()}catch(e){}};
+    if(opts.signal)opts.signal.addEventListener('abort',stop);
+    let text='';
+    try{
+      const msgs=toMsgs(input);
+      if(json)msgs[0].content+='\n\nReply with valid JSON only: no explanation, no markdown fences.';
+      const req={messages:msgs,temperature:json?0.3:0.7,max_tokens:json?700:650,stream:true};
+      const chunks=await eng.chat.completions.create(req);
+      for await(const c of chunks){const d=(c.choices&&c.choices[0]&&c.choices[0].delta&&c.choices[0].delta.content)||'';if(d){text+=d;if(opts.onText)opts.onText({text,delta:d})}}
+    }finally{if(opts.signal)opts.signal.removeEventListener('abort',stop)}
+    if(opts.signal&&opts.signal.aborted)throw {code:'cancelled',text};
+    if(!text.trim())throw {code:'empty_completion'};
+    return text.trim();
+  };
+  const f=async(input,opts={})=>({text:await run(input,opts),truncated:false});
+  f.json=async(input,opts={})=>{const t=await run(input,opts,true);const m=t.match(/[\[{][\s\S]*[\]}]/);try{return JSON.parse(m?m[0]:t)}catch(e){throw {code:'invalid_json',text:t}}};
+  f.local=true;return f;
+}
+function openLocalAIInfo(){
+  const dlg=$('#dlg');const m=lowMemDevice()?LOCAL_AI.small:LOCAL_AI.big;
+  dlg.innerHTML=`<div class="dlg-in"><div class="row" style="justify-content:space-between"><div><p class="mono">Free on-device AI</p><h2 id="dlg-title">An AI helper that runs <em>on your device</em></h2></div><button type="button" class="mini" data-act="dlg-close" aria-label="Close">${ic('x')}</button></div>
+   <ul class="facts">
+    <li>${ic('lock')}<span><b>Private.</b> Your questions never leave this device. Nothing is sent to Bloom or anyone else.</span></li>
+    <li>${ic('cloud')}<span><b>One-time download, ${m.size}.</b> Use Wi-Fi if you can. After that it starts from this browser’s storage, even offline.</span></li>
+    <li>${ic('spark')}<span><b>Free, and a bit simpler.</b> It’s a small AI model, so answers are shorter and it can make mistakes. Check important facts with your teacher.</span></li>
+    <li>${ic('device')}<span><b>Works best on a laptop</b> in Chrome or Edge. Some phones and older computers can’t run it.</span></li>
+   </ul>
+   <div class="row"><button class="btn primary" data-act="local-ai-start">${ic('play')} Download and turn on</button><button class="btn ghost" data-act="dlg-close">Not now</button></div>
+   <p class="fine">You can turn it off and remove the download any time in Settings.</p></div>`;
+  if(!dlg.open){try{dlg.showModal()}catch(e){dlg.setAttribute('open','')}}
+}
+async function removeLocalAI(){
+  setLocalOptIn(false);
+  try{if(localEngine&&localEngine.unload)await localEngine.unload()}catch(e){}
+  localEngine=null;localLoading=null;localModel=null;aiStatus='local-off';aiNote='';
+  try{const ks=await caches.keys();await Promise.all(ks.filter(k=>/webllm/i.test(k)).map(k=>caches.delete(k)))}catch(e){}
+  paintAIStatus();
+}
+
 /* ---------- storage: device or account ---------- */
 let storageOK=true, syncState='', state=null, booting=false;
 function readLocal(){try{const r=localStorage.getItem(KEY)||localStorage.getItem(OLDKEY);return r?JSON.parse(r):null}catch(e){storageOK=false;return null}}
@@ -970,22 +1049,30 @@ let sampleFn=null, aiStatus='checking', aiNote='';
 async function initAI(){
   try{
     if(!window.claude||typeof window.claude.use!=='function'){
-      if(SB&&CFG.aiEndpoint){sampleFn=makeHostedSample();aiStatus=ACC.ready?'live':'demo';aiNote=ACC.ready?'':'Sign in to your Bloom account to use the live AI helpers.'}
-      else{aiStatus='demo';aiNote='Live AI isn’t connected in this version of Bloom yet, so helpers show example replies.'}}
+      if(CFG.aiMode==='hosted'&&SB&&CFG.aiEndpoint){sampleFn=makeHostedSample();aiStatus=ACC.ready?'live':'demo';aiNote=ACC.ready?'':'Sign in to your Bloom account to use the live AI helpers.'}
+      else if(CFG.aiMode!=='off'&&await localSupported()){sampleFn=makeLocalSample();aiStatus=localOptedIn()?'local':'local-off';aiNote=''}
+      else{aiStatus='demo';aiNote='This browser can’t run Bloom’s free AI (it needs a recent Chrome or Edge on a laptop), so helpers show example replies.'}}
     else{sampleFn=await window.claude.use('sample');aiStatus=sampleFn?'live':'demo';if(!sampleFn)aiNote='Live AI isn’t available in this view.'}
   }catch(e){aiStatus='demo';aiNote='Live AI isn’t available in this view.'}
   paintAIStatus();
+  if(sampleFn&&sampleFn.local&&state&&state.onboarded&&!booting&&!document.querySelector('#dlg[open]'))render();
 }
 function statusPill(){
   if(aiStatus==='live') return `<span class="status live" title="Replies come from Claude, an AI model">Live AI</span>`;
+  if(aiStatus==='local') return `<span class="status live" title="A small AI model running privately on this device">On-device AI</span>`;
+  if(aiStatus==='local-loading') return `<span class="status checking" role="status">Getting AI ready… ${localProgress}%</span>`;
+  if(aiStatus==='local-off') return `<span class="status demo">Example replies</span> <button type="button" class="btn primary sm" data-act="local-ai-info">Turn on free AI</button>`;
   if(aiStatus==='checking') return `<span class="status checking">Checking AI…</span>`;
   return `<span class="status demo" title="${esc(aiNote)}">Demo replies · AI not connected</span>`;
 }
-function paintAIStatus(){document.querySelectorAll('[data-ai-status]').forEach(el=>el.innerHTML=statusPill()+(aiStatus==='demo'&&aiNote?` <span class="fine">${esc(aiNote)}</span>`:''))}
+function aiStatusHTML(){return statusPill()+((aiStatus==='demo'||aiStatus==='local-off')&&aiNote?` <span class="fine">${esc(aiNote)}</span>`:'')}
+function paintAIStatus(){document.querySelectorAll('[data-ai-status]').forEach(el=>el.innerHTML=aiStatusHTML())}
+const aiOn=()=>!!sampleFn&&(aiStatus==='live'||aiStatus==='local'||aiStatus==='local-loading');
 function aiFail(e){
   const c=e&&e.code;
   if(['not_granted','sampling_disabled','not_declared','capability_disabled','capability_removed'].includes(c)){aiStatus='demo';aiNote=c==='not_granted'?'You didn’t allow AI for this page, so helpers show demo replies.':'AI isn’t available for this account, so helpers show demo replies.';paintAIStatus();return 'switch'}
   if(c==='not_signed_in'){aiStatus='demo';aiNote='Sign in to your Bloom account to use the live AI helpers.';paintAIStatus();return 'switch'}
+  if(c==='local_failed')return 'switch';
   if(c==='not_configured'){aiStatus='demo';aiNote='The AI helpers aren’t set up on this site yet, so they show example replies.';paintAIStatus();return 'switch'}
   if(e&&e.userMsg&&c!=='cancelled') return e.userMsg;
   if(c==='rate_limited') return 'The AI is busy or you’ve reached a usage limit. Try again in a little while.';
@@ -1357,7 +1444,7 @@ function renderMoodAI(){
   const s=state.settings,ins=state.aiInsight;
   return `<section class="sheet ai-sheet" aria-labelledby="ai-h">
    <div class="sec-head"><div><p class="mono">Optional</p><h2 id="ai-h" style="margin-top:6px">Reflect <em>with AI</em></h2><p class="fine" style="margin-top:6px;max-width:58ch">An AI can look over your check-ins and habits for gentle patterns and talk them through with you. It won’t diagnose anything or label you.</p></div><span data-ai-status>${statusPill()}</span></div>
-   ${!s.aiMood?`<div class="stack"><p style="max-width:62ch">This is off. Turning it on lets Bloom send your mood scores, feelings, context tags, habits and focus counts to Claude (an AI model) <b>only when you press the button</b>. Journal notes stay private unless you also allow them.</p>
+   ${!s.aiMood?`<div class="stack"><p style="max-width:62ch">This is off. Turning it on lets Bloom send your mood scores, feelings, context tags, habits and focus counts to ${sampleFn&&sampleFn.local?'the free AI running on this device':'Claude (an AI model)'} <b>only when you press the button</b>. Journal notes stay private unless you also allow them.</p>
      <label class="switch"><input type="checkbox" id="ai-journal-pre"><span><b>Include journal notes too</b><span class="fine">Off by default. You can change this in Settings.</span></span></label>
      <div><button class="btn primary" data-act="ai-mood-on">${ic('spark')} Turn on and look for patterns</button></div></div>`
    :`<div class="stack">
@@ -1365,7 +1452,7 @@ function renderMoodAI(){
      <div class="row"><button class="btn primary" data-act="ai-mood-run" ${aiBusy?'disabled':''}>${ic('spark')} ${ins?'Look again':'Look for patterns'}</button>${aiBusy?`<span class="thinking" aria-live="polite">Thinking<i></i><i></i><i></i> <span class="fine">This can take up to a minute.</span></span>`:''}</div>
      ${aiErr?`<p class="err" role="alert">${esc(aiErr)}</p>`:''}
      ${ins?`<div class="stack">
-       ${ins.demo?'<p><span class="tag sample">Demo example · not from AI</span></p>':`<p class="mono">From Claude · ${fmtDate(ins.at,{day:'numeric',month:'short'})}</p>`}
+       ${ins.demo?'<p><span class="tag sample">Demo example · not from AI</span></p>':`<p class="mono">From ${ins.local?'the free on-device AI':'Claude'} · ${fmtDate(ins.at,{day:'numeric',month:'short'})}</p>`}
        ${ins.support?supportNote():''}
        <p class="pull" style="font-size:1.45rem">${esc(ins.summary||'')}</p>
        <div class="insights">${(ins.patterns||[]).map(p=>`<div class="insight soft"><span class="tic">${ic('spark')}</span><div><b>${esc(p.title)}</b><p>${esc(p.detail)}</p></div></div>`).join('')}</div>
@@ -1538,7 +1625,7 @@ Rules: never diagnose, label, or assess mental health, and never give risk score
 function renderChat(id){
   const c=CHATS[id],msgs=state.chats[id];
   return `<div class="chat" data-chat="${id}">
-   ${id!=='mood'?`<div class="sec-head" style="margin:0"><div><h2>${c.title.replace(' ',' <em>')}</em></h2><p class="fine" style="margin-top:4px">${c.sub}</p></div><span data-ai-status>${statusPill()}${aiStatus==='demo'&&aiNote?` <span class="fine">${esc(aiNote)}</span>`:''}</span></div>`:'<h3>Talk it <em>through</em></h3>'}
+   ${id!=='mood'?`<div class="sec-head" style="margin:0"><div><h2>${c.title.replace(' ',' <em>')}</em></h2><p class="fine" style="margin-top:4px">${c.sub}</p></div><span data-ai-status>${aiStatusHTML()}</span></div>`:'<h3>Talk it <em>through</em></h3>'}
    ${id==='study'?`<div class="row"><label class="field" style="flex:0 1 220px"><span class="fine" style="font-weight:600">Level</span><select id="study-level" data-edit="study-level"><option value="">Not sure / any</option>${['IGCSE Core','IGCSE Extended','IB SL','IB HL','IB MYP'].map(l=>`<option ${state.ui.studyLevel===l?'selected':''}>${l}</option>`).join('')}</select></label></div>`:''}
    <div class="chat-log" id="log-${id}" aria-live="polite" aria-label="${c.title} conversation">${chatLogHTML(id)}</div>
    ${!msgs.length?`<div class="starters" aria-label="Suggestions">${c.starters.map(s=>`<button class="starter" data-act="starter" data-chat="${id}" data-text="${esc(s)}">${esc(s)}</button>`).join('')}</div>`:''}
@@ -1546,7 +1633,7 @@ function renderChat(id){
      <textarea id="in-${id}" name="text" rows="1" maxlength="2000" placeholder="${esc(c.placeholder)}"></textarea>
      <button class="btn primary" type="submit" id="send-${id}" aria-label="Send" ${busyChat[id]?'hidden':''}>${ic('send')}</button>
      <button class="btn ghost" type="button" data-act="chat-stop" data-chat="${id}" id="stop-${id}" aria-label="Stop reply" ${busyChat[id]?'':'hidden'}>${ic('stop')}</button></form>
-   <div class="row" style="justify-content:space-between"><p class="fine" style="max-width:62ch">${id==='mood'?'Uses only what you chose to share above.':'What you type here is sent to AI. Don’t include personal details. Mood, habits and journal entries are never included.'} AI can make mistakes, so check important facts with your teacher.</p>
+   <div class="row" style="justify-content:space-between"><p class="fine" style="max-width:62ch">${id==='mood'?'Uses only what you chose to share above.':(sampleFn&&sampleFn.local?'This AI runs on your device, so what you type stays here. Mood, habits and journal entries are never included.':'What you type here is sent to AI. Don’t include personal details. Mood, habits and journal entries are never included.')} AI can make mistakes, so check important facts with your teacher.</p>
    ${msgs.length?`<button class="link" data-act="chat-clear" data-chat="${id}">Clear chat</button>`:''}</div></div>`;
 }
 function chatLogHTML(id){
@@ -1570,9 +1657,9 @@ async function sendChat(id,text){
   text=text.trim();if(!text||busyChat[id])return;
   const msgs=state.chats[id];msgs.push({role:'user',content:text});
   if(CRISIS.test(text)){msgs.push({role:'safety'});save();paintChat(id);return}
-  const reply={role:'assistant',content:'',pending:true,mid:uid(),demo:aiStatus!=='live'};msgs.push(reply);busyChat[id]=true;paintChat(id);
-  if(aiStatus==='checking'){for(let i=0;i<20&&aiStatus==='checking';i++)await wait(250);reply.demo=aiStatus!=='live'}
-  if(aiStatus==='live'){
+  const reply={role:'assistant',content:'',pending:true,mid:uid(),demo:!aiOn()};msgs.push(reply);busyChat[id]=true;paintChat(id);
+  if(aiStatus==='checking'){for(let i=0;i<20&&aiStatus==='checking';i++)await wait(250);reply.demo=!aiOn()}
+  if(aiOn()){
     const turns=[{role:'user',content:CHATS[id].rules()},...msgs.filter(m=>m!==reply&&((m.role==='user')||(m.role==='assistant'&&m.content&&!m.demo))).slice(-16).map(m=>({role:m.role,content:m.content}))];
     ctlChat[id]=new AbortController();
     try{const r=await sampleFn(turns,{cache:false,modelTier:'quick',signal:ctlChat[id].signal,onText:({text})=>{reply.content=text;const b=$('#b-'+reply.mid+' .mdbody');if(b)b.innerHTML=md(text);const log=$('#log-'+id);if(log)log.scrollTop=log.scrollHeight}});
@@ -1726,7 +1813,7 @@ function privacyText(){
   const where=state.storage==='account'
     ?ACC.kind==='sb'?'Your Bloom is saved to your Bloom account, in a private space only you can read. It isn’t end-to-end encrypted, and Bloom hasn’t had a school safeguarding review yet.':'Your Bloom is saved to your claude.ai account in a private space only you can open. The person who shared Bloom with you can’t read it. It isn’t end-to-end encrypted, and this is a prototype that hasn’t had a school safeguarding review.'
     :`Your Bloom is saved in this browser on this device only${storageOK?'':' (storage is blocked right now, so nothing will be kept after you close the page)'}. It isn’t encrypted or backed up.`;
-  return `${where} Nothing is shared with classmates or teachers. Messages you type into the Study helper and Task helper are sent to Claude (an AI model) to get a reply. Mood, habits and journal entries are only sent if you turn on AI reflection and press the button.`;
+  return `${where} Nothing is shared with classmates or teachers. ${sampleFn&&sampleFn.local?'The free AI helpers run on this device, so what you type into them never leaves it. Mood, habits and journal entries are only given to the AI if you turn on AI reflection and press the button.':'Messages you type into the Study helper and Task helper are sent to Claude (an AI model) to get a reply. Mood, habits and journal entries are only sent if you turn on AI reflection and press the button.'}`;
 }
 
 /* ---------- STUDIO ---------- */
@@ -1900,6 +1987,9 @@ function openSettings(){
     <div class="form-row c2"><label class="field"><span>Time</span><input type="time" name="remTime" id="rem-time" value="${esc(s.reminders.time)}"></label>
     <fieldset><legend class="legend">Remind me to</legend><div class="chips">${[['checkin','Check in'],['habits','Do my habits'],['focus','Focus'],['wins','Save a win']].map(([v,l])=>`<label class="chip"><input type="checkbox" name="remKind" value="${v}" id="rk-${v}" ${s.reminders.kinds.includes(v)?'checked':''}><span>${l}</span></label>`).join('')}</div></fieldset></div></div>
    <div class="dlg-sec"><h3>Where your data is saved</h3>${ACC.kind==='sb'?`<div class="row" style="justify-content:space-between"><span class="fine">Signed in as <b>${esc(ACC.email||'')}</b></span><button type="button" class="btn ghost sm" data-act="sign-out">Sign out</button></div>`:''}${storageCards(state.storage,'set-')}<p class="fine">Switching moves everything across. Switching back to this device also removes the copy from your account.</p></div>
+   ${sampleFn&&sampleFn.local?`<div class="dlg-sec"><h3>Free on-device AI</h3>
+    <p class="fine">${aiStatus==='local-off'?'Off. Turn it on to get real AI answers that run privately on this device (a one-time download).':'On. The Study helper, Task helper and AI reflection run on this device, and your questions never leave it.'}</p>
+    <div class="row">${aiStatus==='local-off'?`<button type="button" class="btn primary sm" data-act="local-ai-info">Turn on free AI</button>`:`<button type="button" class="btn ghost sm" data-act="local-ai-remove">Turn off and remove the download</button>`}</div></div>`:''}
    <div class="dlg-sec"><h3>Privacy &amp; AI</h3>
     <label class="switch"><input type="checkbox" name="aiMood" id="ai-mood" ${s.aiMood?'checked':''}><span><b>Let AI look at my check-ins when I ask</b><span class="fine">Off by default. Sends mood scores, feelings, tags, habits and focus counts only when you press “Look for patterns”.</span></span></label>
     <label class="switch"><input type="checkbox" name="aiJournal" id="ai-journal" ${s.aiJournal?'checked':''}><span><b>Include journal notes</b><span class="fine">Off by default. Only applies if the setting above is on.</span></span></label>
@@ -1965,6 +2055,10 @@ document.addEventListener('click',async e=>{
    case 'open-settings':openSettings();break;
    case 'auth-open':obCollect&&state&&!state.onboarded&&obCollect();openAuth(d.mode);break;
    case 'sign-out':signOut();break;
+   case 'local-ai-info':openLocalAIInfo();break;
+   case 'local-ai-start':closeDlg();setLocalOptIn(true);toast('Downloading the free AI. You can keep using Bloom while it gets ready.');
+     ensureLocalEngine().then(()=>toast(`Free AI is ready (${localModel?localModel.size.replace('about ',''):''} model). Ask away.`)).catch(()=>toast('This device couldn’t start the free AI. Helpers will keep showing example replies.'));break;
+   case 'local-ai-remove':await removeLocalAI();closeDlg();render();toast('Free AI turned off and its download removed.');break;
    case 'auth-reset':{const email=($('#auth-email')?.value||'').trim();const err=$('#auth-err'),ok=$('#auth-ok');
      if(!/^\S+@\S+\.\S+$/.test(email)){err.textContent='Type your email above first, then tap “Forgot your password?” again.';return}
      try{const {error}=await SB.auth.resetPasswordForEmail(email,{redirectTo:location.origin+location.pathname});if(error)throw error;err.textContent='';ok.hidden=false;ok.textContent='If there’s an account with that email, a reset link is on its way.'}catch(e2){err.textContent=authErr(e2)}break}
@@ -2121,7 +2215,7 @@ async function runMoodAI(){
   aiBusy=true;render();
   if(aiStatus==='checking'){for(let i=0;i<20&&aiStatus==='checking';i++)await wait(250)}
   const local=analyze();
-  if(aiStatus!=='live'){await wait(800);
+  if(!aiOn()){await wait(800);
     state.aiInsight={demo:true,at:Date.now(),summary:'Your check-ins look mostly “Okay” to “Good”, with a few tougher days around tests.',
       patterns:(local.items.length?local.items.slice(0,3):[{title:'Not much data yet',detail:'A few more check-ins would make patterns clearer.'}]).map(i=>({title:i.title,detail:i.detail})),
       ideas:['On test days, plan a short walk or two minutes of box breathing.','Keep using short focus blocks. They seem to suit you.'],question:'What’s one thing that made your best day this month feel good?'};
@@ -2135,6 +2229,16 @@ Patterns already calculated on the device (you may build on them): ${local.items
 Reply with only JSON in this shape:
 {"summary":"1–2 sentences","patterns":[{"title":"max 8 words","detail":"max 40 words"}],"ideas":["max 20 words"],"question":"one optional reflection question","support":false}
 Give 2–4 patterns and 2–3 ideas.`;
+  if(sampleFn.local){
+    try{
+      const {text}=await sampleFn(`Here are a secondary-school student's own mood check-ins from the last 30 days (mood 1 Rough to 5 Great), shared by them for reflection:
+${moodDataText(state.settings.aiJournal).split('\n').slice(-20).join('\n')}
+Patterns already found: ${local.items.slice(0,4).map(i=>i.title).join('; ')||'none'}.
+Write a short, warm reflection for them in 3 to 5 sentences: one thing that seems to go with better days, one thing that seems harder, and one small, optional idea to try. Use "might" and "seems". Don't diagnose or label them. End with one gentle question they could think about.`,{});
+      state.aiInsight={demo:false,local:true,at:Date.now(),summary:text,patterns:local.items.slice(0,4).map(i=>({title:i.title,detail:i.detail})),ideas:[],question:'',support:CRISIS.test(text)};
+    }catch(e){const res=aiFail(e);if(res==='switch'){aiBusy=false;return runMoodAI()}aiErr=res||''}
+    aiBusy=false;save();render();return;
+  }
   try{const r=await sampleFn.json(prompt,{modelTier:'default',cache:false});
     if(!r||typeof r!=='object'||!Array.isArray(r.patterns))throw {code:'invalid_json'};
     state.aiInsight={demo:false,at:Date.now(),summary:String(r.summary||''),patterns:r.patterns.slice(0,4).map(p=>({title:String(p.title||''),detail:String(p.detail||'')})),ideas:(Array.isArray(r.ideas)?r.ideas:[]).slice(0,3).map(String),question:String(r.question||''),support:!!r.support};
@@ -2144,11 +2248,23 @@ Give 2–4 patterns and 2–3 ideas.`;
 }
 async function aiBreakdown(id,btn){
   const t=state.tasks.find(t=>t.id===id);if(!t)return;
-  if(aiStatus!=='live'){const steps=localBreakdown(t.title,t.effort);const ex=new Set(t.steps.map(s=>s.text));steps.filter(s=>!ex.has(s)).forEach(s=>t.steps.push({id:uid(),text:s,done:false}));save();render();
+  for(let i=0;i<20&&aiStatus==='checking';i++)await wait(250);
+  if(!aiOn()){const steps=localBreakdown(t.title,t.effort);const ex=new Set(t.steps.map(s=>s.text));steps.filter(s=>!ex.has(s)).forEach(s=>t.steps.push({id:uid(),text:s,done:false}));save();render();
     toast(aiStatus==='checking'?'Still connecting to AI, so these are built-in suggestions.':'AI isn’t connected here, so these are built-in suggestions.');return}
   btn.disabled=true;btn.innerHTML=`<span class="thinking">Thinking<i></i><i></i><i></i></span>`;
+  if(sampleFn.local){
+    try{
+      const {text}=await sampleFn(`A secondary-school student has this task: "${t.title}" (subject: ${t.subject}${t.due?`, due ${t.due}, today is ${todayK()}`:''}).
+Write a checklist of 4 to 6 small, concrete steps to get it done, including one short break. Put each step on its own line starting with "- ". Keep each step under 10 words. Write nothing else.`,{});
+      const steps=text.split('\n').map(l=>(l.match(/^\s*(?:[-*•]|\d+[.)])\s*(?:\[ ?\]\s*)?(.+)$/)||[])[1]).filter(Boolean).map(s=>s.replace(/\*\*/g,'').trim()).filter(s=>s.length>2).slice(0,8);
+      if(steps.length<2)throw {code:'invalid_json'};
+      t.steps=[...t.steps.filter(s=>s.done),...steps.map(s=>({id:uid(),text:s.slice(0,140),done:false}))];save();render();toast('New steps suggested by the free AI. Edit anything that doesn’t fit.');
+    }catch(e){const res=e&&e.code==='invalid_json'?'The AI’s suggestion didn’t come out as a list. Try again.':aiFail(e);if(res==='switch')return aiBreakdown(id,btn);render();if(res)toast(res)}
+    return;
+  }
   try{const r=await sampleFn.json(`A secondary-school student (IGCSE/IB) has this task: "${t.title}" (subject: ${t.subject}; ${t.due?`due ${t.due}, today is ${todayK()}`:'no due date'}; effort: ${t.effort}). Steps they already have: ${t.steps.map(s=>s.text).join('; ')||'none'}.
 Suggest a realistic checklist of 3–7 small, concrete steps (each 10–40 minutes), including one short break. Keep each step under 10 words, in plain friendly language. Reply with only a JSON array of strings, e.g. ["Choose a question","Find two sources"].`,{modelTier:'quick',cache:false});
+    if(r&&!Array.isArray(r)&&typeof r==='object'){const a=Object.values(r).find(Array.isArray);if(a)r=a}
     if(!Array.isArray(r)||!r.length)throw {code:'invalid_json'};
     t.steps=[...t.steps.filter(s=>s.done),...r.slice(0,8).map(s=>({id:uid(),text:String(s).slice(0,140),done:false}))];save();render();toast('New steps suggested by AI. Edit anything that doesn’t fit.');
   }catch(e){const res=e&&e.code==='invalid_json'?'The AI’s suggestion came back in an odd format. Try again.':aiFail(e);if(res==='switch')return aiBreakdown(id,btn);render();if(res)toast(res)}

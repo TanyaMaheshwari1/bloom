@@ -6,5 +6,9 @@
 window.BLOOM_CONFIG = {
   supabaseUrl: "https://zplxhpiyxkdlvmcrcfjq.supabase.co",
   supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpwbHhocGl5eGtkbHZtY3JjZmpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzNzU4NDQsImV4cCI6MjEwNzk1MTg0NH0.ON8fiRhXqq_vawN1GiBaEAZZ0y0td_MelHXC3IEPRrU",
-  aiEndpoint: "/api/ai" // the Netlify function in netlify/functions/ai.mjs
+  aiEndpoint: "/api/ai", // the Netlify function in netlify/functions/ai.mjs
+  // "on-device": free AI that runs in each student's browser (no key, no cost).
+  // "hosted": Claude through the Netlify function (needs ANTHROPIC_API_KEY on Netlify).
+  // "off": example replies only.
+  aiMode: "on-device"
 };
