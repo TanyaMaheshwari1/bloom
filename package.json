@@ -1,0 +1,9 @@
+{
+  "name": "bloom-by-project-budline",
+  "private": true,
+  "type": "module",
+  "description": "Bloom, a study and wellbeing companion by Project Budline",
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest"
+  }
+}
